@@ -7,6 +7,9 @@ urlpatterns = [
     path('auth/login/', TokenObtainPairView.as_view()),
 
     path('projects/', ProjectView.as_view()),
+    path('projects/<int:project_id>/', ProjectDetailView.as_view()),
+
     path('projects/<int:project_id>/document/', DocumentView.as_view()),
     path('document/<int:document_id>/history/', HistoryView.as_view()),
 ]
+
