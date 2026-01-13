@@ -51,6 +51,14 @@ class Document(models.Model):
     def __str__(self):
         return f"Document for {self.project.title}"
 
+# Add file upload endpoints
+class DocumentFile(models.Model):
+    document = models.ForeignKey(Document, on_delete=models.CASCADE, related_name='files')
+    file = models.FileField(upload_to='documents/%Y/%m/%d/')
+    uploaded_at = models.DateTimeField(auto_now_add=True)
+    filename = models.CharField(max_length=255)
+    
+# Add file upload endpoints
 class History(models.Model):
     document = models.ForeignKey(Document, on_delete=models.CASCADE, related_name='history')
     content_snapshot = models.TextField()
