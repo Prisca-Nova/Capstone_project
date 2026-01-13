@@ -1,103 +1,111 @@
-from django.shortcuts import render
-from rest_framework.views import APIView
+from rest_framework import viewsets, status, generics
+from rest_framework.permissions import IsAuthenticated, AllowAny
 from rest_framework.response import Response
-from rest_framework.permissions import IsAuthenticated
-from django.contrib.auth.models import User
-from .models import Project, Document, History
+from rest_framework.decorators import action
+from rest_framework.views import APIView
+from django.shortcuts import get_object_or_404
+from django.utils import timezone
+from .models import Project, Document, History, User
+from .serializers import (
+    UserSerializer, ProjectSerializer, 
+    DocumentSerializer, HistorySerializer
+)
+from rest_framework_simplejwt.tokens import RefreshToken
+from rest_framework.permissions import BasePermission
 
-class RegisterView(APIView):
-    def post(self, request):
-        User.objects.create_user(
-            username=request.data['email'],
-            email=request.data['email'],
-            password=request.data['password']
-        )
-        return Response({"message": "User created"})
+class IsOwner(BasePermission):
+    def has_object_permission(self, request, view, obj):
+        if hasattr(obj, 'owner'):
+            return obj.owner == request.user
+        elif hasattr(obj, 'project'):
+            return obj.project.owner == request.user
+        return False
 
-class ProjectView(APIView):
+class RegisterView(generics.CreateAPIView):
+    queryset = User.objects.all()
+    permission_classes = (AllowAny,)
+    serializer_class = UserSerializer
+    
+    def create(self, request, *args, **kwargs):
+        serializer = self.get_serializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        user = serializer.save()
+        
+        refresh = RefreshToken.for_user(user)
+        return Response({
+            'user': serializer.data,
+            'refresh': str(refresh),
+            'access': str(refresh.access_token),
+        }, status=status.HTTP_201_CREATED)
+
+class ProjectViewSet(viewsets.ModelViewSet):
+    serializer_class = ProjectSerializer
     permission_classes = [IsAuthenticated]
-
-    def get(self, request):
-        projects = Project.objects.filter(owner=request.user)
-        return Response([
-            {
-                "id": p.id,
-                "title": p.title,
-                "description": p.description
-            } for p in projects
-        ])
-
-    def post(self, request):
-        if not request.data.get("title"):
-            return Response(
-                {"error": "Title is required"},
-                status=status.HTTP_400_BAD_REQUEST
+    
+    def get_queryset(self):
+        return Project.objects.filter(owner=self.request.user)
+    
+    def perform_create(self, serializer):
+        project = serializer.save(owner=self.request.user)
+        # Create a document automatically when project is created
+        Document.objects.create(project=project, content="")
+        return project
+    
+    @action(detail=True, methods=['get'])
+    def document(self, request, pk=None):
+        project = self.get_object()
+        try:
+            document = Document.objects.get(project=project)
+        except Document.DoesNotExist:
+            document = Document.objects.create(project=project, content="")
+        serializer = DocumentSerializer(document)
+        return Response(serializer.data)
+    
+    @document.mapping.put
+    def update_document(self, request, pk=None):
+        project = self.get_object()
+        try:
+            document = Document.objects.get(project=project)
+        except Document.DoesNotExist:
+            document = Document.objects.create(project=project, content="")
+        
+        # Save current content to history before updating
+        if document.content:
+            History.objects.create(
+                document=document,
+                content_snapshot=document.content
             )
+        
+        serializer = DocumentSerializer(document, data=request.data, partial=True)
+        if serializer.is_valid():
+            serializer.save()
+            return Response(serializer.data)
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
-        project = Project.objects.create(
-            owner=request.user,
-            title=request.data["title"],
-            description=request.data.get("description", "")
-        )
-        return Response({"id": project.id}, status=status.HTTP_201_CREATED)
-class DocumentView(APIView):
+class DocumentViewSet(viewsets.ModelViewSet):
+    queryset = Document.objects.all()
+    serializer_class = DocumentSerializer
     permission_classes = [IsAuthenticated]
+    
+    def get_queryset(self):
+        return Document.objects.filter(project__owner=self.request.user)
+    
+    def update(self, request, *args, **kwargs):
+        document = self.get_object()
+        
+        # Save to history before updating
+        if document.content:
+            History.objects.create(
+                document=document,
+                content_snapshot=document.content
+            )
+        
+        return super().update(request, *args, **kwargs)
 
-    def get_project(self, project_id, user):
-        return get_object_or_404(Project, id=project_id, owner=user)
-
-    def get(self, request, project_id):
-        project = self.get_project(project_id, request.user)
-        doc, _ = Document.objects.get_or_create(project=project)
-        return Response({"content": doc.content})
-
-    def put(self, request, project_id):
-        project = self.get_project(project_id, request.user)
-        doc, _ = Document.objects.get_or_create(project=project)
-
-        History.objects.create(
-            document=doc,
-            content_snapshot=doc.content
-        )
-
-        doc.content = request.data.get("content", "")
-        doc.save()
-
-        return Response({"message": "Saved"})
-
-class HistoryView(APIView):
+class HistoryViewSet(viewsets.ReadOnlyModelViewSet):
+    serializer_class = HistorySerializer
     permission_classes = [IsAuthenticated]
-
-    def get(self, request, document_id):
-        history = History.objects.filter(
-            document_id=document_id
-        ).order_by("-timestamp")[:10]
-
-        return Response([
-            {
-                "content": h.content_snapshot,
-                "timestamp": h.timestamp
-            } for h in history
-        ])
-
-class ProjectDetailView(APIView):
-    permission_classes = [IsAuthenticated]
-
-    def put(self, request, project_id):
-        project = get_object_or_404(
-            Project, id=project_id, owner=request.user
-        )
-
-        project.title = request.data.get("title", project.title)
-        project.description = request.data.get("description", project.description)
-        project.save()
-
-        return Response({"message": "Project updated"})
-
-    def delete(self, request, project_id):
-        project = get_object_or_404(
-            Project, id=project_id, owner=request.user
-        )
-        project.delete()
-        return Response({"message": "Project deleted"})
-
+    
+    def get_queryset(self):
+        document_id = self.kwargs.get('document_id')
+        return History.objects.filter(document_id=document_id)
